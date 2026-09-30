@@ -3326,7 +3326,9 @@ final class Browser: NSObject, ObservableObject {
         let title = tab.title.trimmingCharacters(in: .whitespacesAndNewlines)
         let stem = (title.isEmpty ? tab.pageAddress?.host() ?? "Page" : title)
             .replacingOccurrences(of: "/", with: "-")
+            .replacingOccurrences(of: ":", with: "-")
         panel.nameFieldStringValue = stem.lowercased().hasSuffix(".pdf") ? stem : stem + ".pdf"
+        panel.directoryURL = downloadsFolder
         panel.beginSheetModal(for: window) { [weak self] answer in
             guard answer == .OK, let file = panel.url else { return }
             self?.exportPDF(to: file)
