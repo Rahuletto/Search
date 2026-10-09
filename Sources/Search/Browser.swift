@@ -3618,9 +3618,10 @@ final class Browser: NSObject, ObservableObject {
 
     /// Back, and still on the tab it came from: into the tab again.
     func appBack() {
-        // A floating panel can keep Search active on another desktop. That
-        // is not a return to the source window, for video or for a call.
-        guard let window, window.isOnActiveSpace else { return }
+        // Activation during a desktop or Stage Manager transition is not a
+        // return to the source window. Wait for that window to have the keys,
+        // rather than landing PiP and lifting it again as activation settles.
+        guard let window, window.isOnActiveSpace, window.isKeyWindow else { return }
         defer { liftedAway = false }
         let pending = Shared.pendingFloat.flatMap { $0.owner === self ? $0.tab : nil }
         if liftedAway, let id = floating ?? pending, id == activeID { land() }

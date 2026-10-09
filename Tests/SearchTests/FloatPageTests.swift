@@ -6,7 +6,10 @@ import XCTest
 @MainActor
 final class FloatPageTests: XCTestCase {
     private final class OtherDesktop: NSWindow {
-        override var isOnActiveSpace: Bool { false }
+        var onDesktop = false
+        var hasKeys = false
+        override var isOnActiveSpace: Bool { onDesktop }
+        override var isKeyWindow: Bool { hasKeys }
     }
 
     override class func setUp() {
@@ -60,6 +63,10 @@ final class FloatPageTests: XCTestCase {
 
         browser.prefs.floatsPages = true
         browser.desktopChanged()
+        // During a desktop transition the app can activate before the source
+        // window has focus. Neither a pending lift nor an open PiP should land.
+        window.onDesktop = true
+        browser.appBack()
         try await waitForFloat(browser)
         XCTAssertEqual(browser.floating, tab.id, "desktop floating remains available when opted in")
         browser.land()
@@ -68,6 +75,14 @@ final class FloatPageTests: XCTestCase {
         browser.appLeft()
         try await waitForFloat(browser)
         XCTAssertEqual(browser.floating, tab.id, "the existing app-switch video setting still works")
+        browser.appBack()
+        XCTAssertEqual(browser.floating, tab.id, "activation without source-window focus must keep PiP open")
+        XCTAssertTrue(browser.floater.showing)
+
+        window.hasKeys = true
+        browser.appBack()
+        XCTAssertNil(browser.floating, "returning to the source window still returns the video")
+        XCTAssertFalse(browser.floater.showing)
     }
 
     private func waitForFloat(_ browser: Browser) async throws {
