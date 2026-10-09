@@ -1640,6 +1640,7 @@ final class Browser: NSObject, ObservableObject {
             else { return }
             tab.web.evaluateInSearch(Isolate.skip(seconds))
         }
+        // Both status paths share one outstanding evaluation per session.
         // A busy web process must not accumulate half-second requests.
         var checking = false
         floater.onProgress = { [weak self] answer in
@@ -1651,11 +1652,35 @@ final class Browser: NSObject, ObservableObject {
                 MainActor.assumeIsolated {
                     defer { checking = false }
                     guard let self, self.floating == id, tab.web.window === window,
+                          self.floater.presentation == .video,
                           let pair = found as? [Any], pair.count == 2,
                           let through = pair[0] as? Double,
                           let playing = pair[1] as? Bool
                     else { return }
                     answer(through, playing)
+                }
+            }
+        }
+        var meetingAddress: URL?
+        var meetingScript: String?
+        floater.onPageCheck = { [weak self] in
+            guard !checking, let self, let id = self.floating,
+                  let tab = self.tabs.first(where: { $0.id == id }), let window = tab.web.window
+            else { return }
+            if meetingAddress != tab.pageAddress {
+                meetingAddress = tab.pageAddress
+                meetingScript = Players.meetingState(meetingAddress)
+            }
+            guard let script = meetingScript else { return }
+            let address = meetingAddress
+            checking = true
+            tab.web.evaluateInSearch(script) { [weak self] state in
+                MainActor.assumeIsolated {
+                    defer { checking = false }
+                    guard let self, self.floating == id, tab.web.window === window,
+                          tab.pageAddress == address,
+                          self.floater.presentation == .page else { return }
+                    if state as? String == "ended" { self.land() }
                 }
             }
         }
@@ -3551,6 +3576,10 @@ final class Browser: NSObject, ObservableObject {
     /// Stepping away from a tab. A video you were watching does not stop
     /// existing because you went to look something up.
     private func leaving() {
+        if prefs.floatsPages, Players.meeting(active?.pageAddress) {
+            lift(active, quietly: true, presentation: .page)
+            return
+        }
         guard prefs.floatsOnLeave else { return }
         lift(active, quietly: true, otherwise: otherPane)
     }
@@ -3568,33 +3597,50 @@ final class Browser: NSObject, ObservableObject {
     private var liftedAway = false
 
     func appLeft() {
-        guard prefs.floatsAway, Browsers.front == nil || Browsers.front === self else { return }
+        guard Browsers.front == nil || Browsers.front === self else { return }
+        let meeting = prefs.floatsPages && Players.meeting(active?.pageAddress)
+        guard meeting || prefs.floatsAway else { return }
         guard !floater.showing, Shared.pendingFloat == nil else { return }
         liftedAway = true
-        lift(active, quietly: true, otherwise: otherPane)
+        lift(active, quietly: true, otherwise: meeting ? nil : otherPane, presentation: meeting ? .page : .video)
+    }
+
+    /// Changing desktops need not change either the active app or key window.
+    /// This new trigger is opt-in, independent of the app-switch video setting.
+    func desktopChanged() {
+        guard prefs.floatsPages, let window else { return }
+        if window.isOnActiveSpace {
+            if NSApp.isActive { appBack() }
+        } else {
+            appLeft()
+        }
     }
 
     /// Back, and still on the tab it came from: into the tab again.
     func appBack() {
+        // A floating panel can keep Search active on another desktop. That
+        // is not a return to the source window, for video or for a call.
+        guard let window, window.isOnActiveSpace else { return }
         defer { liftedAway = false }
         let pending = Shared.pendingFloat.flatMap { $0.owner === self ? $0.tab : nil }
         if liftedAway, let id = floating ?? pending, id == activeID { land() }
     }
 
-    /// ⌘⇧P, for lifting one out by hand.
-    func toggleFloat() {
+    /// A video, or the whole interactive page, lifted out by hand.
+    func toggleFloat(_ presentation: Float.Presentation = .video) {
+        guard presentation == .video || prefs.floatsPages else { return }
         if floater.showing || Shared.pendingFloat != nil {
             land()
             return
         }
-        lift(active, quietly: false, otherwise: otherPane)
+        lift(active, quietly: false, otherwise: presentation == .video ? otherPane : nil, presentation: presentation)
     }
 
     /// Everything but the video goes out of the way, and the page it lives in
     /// moves house — into a small window that stays above everything.
     /// `otherwise`: the other page of a pair, tried when this one has
     /// nothing playing.
-    private func lift(_ tab: Tab?, quietly: Bool, otherwise: Tab? = nil) {
+    private func lift(_ tab: Tab?, quietly: Bool, otherwise: Tab? = nil, presentation: Float.Presentation = .video) {
         // A tab just put down with ⌘W has no page to lift a video out of, and
         // asking it would only build an empty view to ask.
         guard Shared.pendingFloat == nil else { return }
@@ -3611,7 +3657,8 @@ final class Browser: NSObject, ObservableObject {
         // A hero background on a studio's home page is a video too, and it
         // followed people around the desktop. Nor from one you grounded in
         // its site card. ⌘⇧P still lifts from anywhere.
-        if quietly, !Players.knows(tab.address) || tab.pageAddress?.host().map(Grounded.holds) == true {
+        if quietly, presentation == .video,
+           !Players.knows(tab.address) || tab.pageAddress?.host().map(Grounded.holds) == true {
             if let otherwise { lift(otherwise, quietly: quietly) }
             return
         }
@@ -3619,7 +3666,16 @@ final class Browser: NSObject, ObservableObject {
         let address = web.url
         let request = UUID()
         Shared.pendingFloat = (self, tab.id, request)
-        web.evaluateInSearch(Isolate.on(request)) { [weak self] answer in
+        let script: String
+        if presentation == .video {
+            script = Isolate.on(request)
+        } else if quietly, let state = Players.meetingState(tab.pageAddress) {
+            script = Isolate.off(waitForResize: false)
+                + "\nvar meeting = \(state)\nmeeting === 'joined' ? 'floating' : 'none';"
+        } else {
+            script = Isolate.off(waitForResize: false) + "\n'floating';"
+        }
+        web.evaluateInSearch(script) { [weak self] answer in
             MainActor.assumeIsolated {
                 guard let self, Shared.pendingFloat?.request == request else {
                     web.evaluateInSearch(Isolate.off(request, waitForResize: false))
@@ -3628,17 +3684,18 @@ final class Browser: NSObject, ObservableObject {
                 Shared.pendingFloat = nil
                 guard self.tabs.contains(where: { $0 === tab }), tab.built === web,
                       web.url == address, !web.isLoading, !tab.asleep, !self.floater.showing,
+                      presentation == .video || self.prefs.floatsPages,
                       web.fullscreenState == .notInFullscreen else {
                     web.evaluateInSearch(Isolate.off(request, waitForResize: false))
                     return
                 }
                 var videoRect: NSRect?
-                if let box = answer as? [Double], box.count == 4,
+                if presentation == .video, let box = answer as? [Double], box.count == 4,
                    box[2] > 0, box[3] > 0 {
                     videoRect = NSRect(x: box[0] * web.pageZoom, y: box[1] * web.pageZoom,
                                        width: box[2] * web.pageZoom, height: box[3] * web.pageZoom)
                 }
-                guard let videoRect else {
+                guard presentation == .video ? videoRect != nil : (answer as? String) == "floating" else {
                     web.evaluateInSearch(Isolate.off(request, waitForResize: false))
                     if let otherwise { return self.lift(otherwise, quietly: quietly) }
                     self.liftedAway = false
@@ -3649,7 +3706,7 @@ final class Browser: NSObject, ObservableObject {
                 web.onFloatReturn = nil
                 tab.floating = true
                 self.ownFloater()
-                self.floater.lift(web, videoRect: videoRect)
+                self.floater.lift(web, presentation: presentation, title: tab.title, videoRect: videoRect)
             }
         }
     }
@@ -3667,12 +3724,15 @@ final class Browser: NSObject, ObservableObject {
         }
         // The window closes whatever else is true. Tying that to the bookkeeping
         // is how a little window outlives the thing that opened it.
+        let video = floater.presentation == .video
         if floater.showing { floater.drop() }
         guard let id = floating, let tab = tabs.first(where: { $0.id == id }) else { return }
         floating = nil
-        let web = tab.web
-        web.evaluateInSearch(Isolate.off())
-        web.onFloatReturn = { [weak web] in web?.evaluateInSearch(Isolate.landed) }
+        if video {
+            let web = tab.web
+            web.evaluateInSearch(Isolate.off())
+            web.onFloatReturn = { [weak web] in web?.evaluateInSearch(Isolate.landed) }
+        }
         tab.floating = false
     }
 
