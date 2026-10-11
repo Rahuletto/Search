@@ -3331,13 +3331,14 @@ final class Browser: NSObject, ObservableObject {
         panel.directoryURL = downloadsFolder
         panel.beginSheetModal(for: window) { [weak self] answer in
             guard answer == .OK, let file = panel.url else { return }
-            self?.exportPDF(to: file)
+            self?.exportPDF(tab, to: file)
         }
     }
 
-    /// The same export without its save panel, for the bench.
-    func exportPDF(to file: URL, finished: ((Bool) -> Void)? = nil) {
-        guard let tab = active, !tab.isBlank else {
+    /// Keep the tab the save panel was opened for, even if another is active
+    /// when it finishes. The bench passes the current tab without a panel.
+    func exportPDF(_ tab: Tab, to file: URL, finished: ((Bool) -> Void)? = nil) {
+        guard !tab.isBlank else {
             finished?(false)
             return
         }

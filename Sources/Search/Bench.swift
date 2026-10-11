@@ -2120,8 +2120,9 @@ final class Bench {
                 answer(["error": "pdf needs a path"])
                 return
             }
+            guard let tab = browser.active else { answer(["error": "page wasn't exported"]); return }
             let file = URL(fileURLWithPath: path)
-            browser.exportPDF(to: file) { worked in
+            browser.exportPDF(tab, to: file) { worked in
                 answer(worked ? ["saved": file.path] : ["error": "page wasn't exported"])
             }
 
